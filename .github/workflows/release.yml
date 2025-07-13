@@ -62,34 +62,46 @@ jobs:
           git tag v${{ env.RELEASE_VERSION }}
           git push origin v${{ env.RELEASE_VERSION }}
 
-      - name: Generate changelog
-        id: changelog
-        run: |
-          # Поиск предыдущего релизного тега
-          LATEST_TAG=$(git describe --tags --match "v*" --abbrev=0 2>/dev/null || echo "")
-          
-          if [ -z "$LATEST_TAG" ]; then
-            # Первый релиз
-            COMMITS=$(git log --pretty=format:"- %s [%h]")
-          else
-            # Все коммиты с предыдущего релиза
-            COMMITS=$(git log --pretty=format:"- %s [%h]" $LATEST_TAG..HEAD)
-          fi
-          
-          # Форматирование вывода
-          COMMITS="${COMMITS//'%'/'%25'}"
-          COMMITS="${COMMITS//$'\n'/'%0A'}"
-          echo "commits=$COMMITS" >> $GITHUB_OUTPUT
+#      - name: Generate changelog
+#        id: changelog
+#        run: |
+#          # Поиск предыдущего релизного тега
+#          LATEST_TAG=$(git describe --tags --match "v*" --abbrev=0 2>/dev/null || echo "")
+#
+#          if [ -z "$LATEST_TAG" ]; then
+#            # Первый релиз
+#            COMMITS=$(git log --pretty=format:"- %s [%h]")
+#          else
+#            # Все коммиты с предыдущего релиза
+#            COMMITS=$(git log --pretty=format:"- %s [%h]" $LATEST_TAG..HEAD)
+#          fi
+#
+#          # Форматирование вывода
+#          COMMITS="${COMMITS//'%'/'%25'}"
+#          COMMITS="${COMMITS//$'\n'/'%0A'}"
+#          echo "commits=$COMMITS" >> $GITHUB_OUTPUT
 
       - name: Update CHANGELOG.md
         run: |
-          HEADER="# Version ${{ env.RELEASE_VERSION }} ($(date +%Y-%m-%d))"
-          echo -e "$HEADER\n\n${{ steps.changelog.outputs.commits }}\n\n$(cat CHANGELOG.md)" > CHANGELOG.md
-          git config user.name "github-actions"
-          git config user.email "github-actions@users.noreply.github.com"
-          git add CHANGELOG.md
+          
+          PREV=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null \
+               || git rev-list --max-parents=0 HEAD)
+
+          echo "## ${{ env.RELEASE_VERSION }} — $(date +'%Y-%m-%d')" > tmp
+          git log --pretty=format:'- %s' $PREV..HEAD >> tmp
+          cat CHANGELOG.md >> tmp
+          mv tmp CHANGELOG.md
+
           git commit -m "Update changelog for version ${{ env.RELEASE_VERSION }}"
           git push origin ${{ env.RELEASE_BRANCH }}
+
+#          HEADER="# Version ${{ env.RELEASE_VERSION }} ($(date +%Y-%m-%d))"
+#          echo -e "$HEADER\n\n${{ steps.changelog.outputs.commits }}\n\n$(cat CHANGELOG.md)" > CHANGELOG.md
+#          git config user.name "github-actions"
+#          git config user.email "github-actions@users.noreply.github.com"
+#          git add CHANGELOG.md
+#          git commit -m "Update changelog for version ${{ env.RELEASE_VERSION }}"
+#          git push origin ${{ env.RELEASE_BRANCH }}
 
       - name: Create release issue
         uses: actions/github-script@v7
