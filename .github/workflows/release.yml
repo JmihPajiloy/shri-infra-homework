@@ -1,98 +1,116 @@
-name: Release
+name: Release Pipeline
 
 on:
   workflow_dispatch:
 
-env:
-  REGISTRY: cr.yandex
-  REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
-  IMAGE_NAME: app
-  VERSION: ${{ github.run_number }}
-
 jobs:
-  build-test:
+  lint_and_test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          node-version: 20
-      - run: npm ci
-      - run: npm run lint
-      - run: npm run test
+          node-version: '20'
+      - name: Install dependencies
+        run: npm ci
+      - name: Run linter
+        run: npm run lint
+      - name: Run tests
+        run: npm test
 
-  create-branch:
+  release:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      issues: write
-    needs: build-test
+    needs: lint_and_test
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Полная история коммитов для работы с тегами
+
+      - name: Setup environment
+        run: |
+          RELEASE_VERSION=${{ github.run_number }}
+          echo "RELEASE_VERSION=$RELEASE_VERSION" >> $GITHUB_ENV
+          echo "RELEASE_BRANCH=releases/$RELEASE_VERSION" >> $GITHUB_ENV
+
       - name: Create release branch
         run: |
-          git checkout -b releases/$VERSION
-          git push origin releases/$VERSION
+          git checkout -b ${{ env.RELEASE_BRANCH }}
+          git push origin ${{ env.RELEASE_BRANCH }}
 
-  build-push-docker:
-    runs-on: ubuntu-latest
-    needs: create-branch
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: releases/$VERSION
       - name: Login to Yandex Container Registry
-        run: echo "${{ secrets.YC_OAUTH_TOKEN }}" | docker login --username iam --password-stdin $REGISTRY
-      - name: Build and push Docker image
+        env:
+          YC_IAM_TOKEN: ${{ secrets.YC_IAM_TOKEN }}
         run: |
-          docker build -t $REGISTRY/$REGISTRY_ID/$IMAGE_NAME:$VERSION -t $REGISTRY/$REGISTRY_ID/$IMAGE_NAME:${VERSION}_latest .
-          docker push $REGISTRY/$REGISTRY_ID/$IMAGE_NAME:$VERSION
-          docker push $REGISTRY/$REGISTRY_ID/$IMAGE_NAME:${VERSION}_latest
+          echo $YC_IAM_TOKEN | docker login \
+            --username iam \
+            --password-stdin \
+            cr.yandex
 
-  create-tag:
-    runs-on: ubuntu-latest
-    needs: build-push-docker
-    steps:
-      - uses: actions/checkout@v4
+      - name: Build and push Docker image
+        env:
+          YC_REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
+        run: |
+          docker build -t cr.yandex/$YC_REGISTRY_ID/app:${{ env.RELEASE_VERSION }} .
+          docker tag cr.yandex/$YC_REGISTRY_ID/app:${{ env.RELEASE_VERSION }} cr.yandex/$YC_REGISTRY_ID/app:latest
+          docker push cr.yandex/$YC_REGISTRY_ID/app:${{ env.RELEASE_VERSION }}
+          docker push cr.yandex/$YC_REGISTRY_ID/app:latest
+
       - name: Create release tag
         run: |
-          git tag v$VERSION
-          git push origin v$VERSION
+          git tag v${{ env.RELEASE_VERSION }}
+          git push origin v${{ env.RELEASE_VERSION }}
 
-  changelog-issue:
-    runs-on: ubuntu-latest
-    needs: create-tag
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - name: Generate changelog
         id: changelog
         run: |
-          PREV_TAG=$(git describe --tags --abbrev=0 --match "v*" HEAD~1 2>/dev/null || echo "")
-          COMMITS=$(git log --pretty=format:"- %s" $PREV_TAG..HEAD)
-          echo "commits<<EOF" >> $GITHUB_OUTPUT
-          echo "$COMMITS" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          # Поиск предыдущего релизного тега
+          LATEST_TAG=$(git describe --tags --match "v*" --abbrev=0 2>/dev/null || echo "")
+          
+          if [ -z "$LATEST_TAG" ]; then
+            # Первый релиз
+            COMMITS=$(git log --pretty=format:"- %s [%h]")
+          else
+            # Все коммиты с предыдущего релиза
+            COMMITS=$(git log --pretty=format:"- %s [%h]" $LATEST_TAG..HEAD)
+          fi
+          
+          # Форматирование вывода
+          COMMITS="${COMMITS//'%'/'%25'}"
+          COMMITS="${COMMITS//$'\n'/'%0A'}"
+          echo "commits=$COMMITS" >> $GITHUB_OUTPUT
+
       - name: Update CHANGELOG.md
         run: |
-          echo -e "# v$VERSION\n\n${{ steps.changelog.outputs.commits }}\n\n$(cat CHANGELOG.md)" > CHANGELOG.md
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
+          HEADER="# Version ${{ env.RELEASE_VERSION }} ($(date +%Y-%m-%d))"
+          echo -e "$HEADER\n\n${{ steps.changelog.outputs.commits }}\n\n$(cat CHANGELOG.md)" > CHANGELOG.md
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
           git add CHANGELOG.md
-          git commit -m "Update changelog for v$VERSION"
-          git push origin releases/$VERSION
+          git commit -m "Update changelog for version ${{ env.RELEASE_VERSION }}"
+          git push origin ${{ env.RELEASE_BRANCH }}
+
       - name: Create release issue
         uses: actions/github-script@v7
         with:
           script: |
+            const { owner, repo } = context.repo;
+            const version = '${{ env.RELEASE_VERSION }}';
+            const registryId = '${{ secrets.YC_REGISTRY_ID }}';
+            const image = `cr.yandex/${registryId}/app:${version}`;
+            
             github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: `Release v${process.env.VERSION}`,
-              body: `**Date:** ${new Date().toISOString()}
-                      **Author:** ${context.actor}
-                      **Version:** ${process.env.VERSION}
-                      **Commits:**\n${{ steps.changelog.outputs.commits }}
-                      **Docker image:** ${process.env.REGISTRY}/${process.env.REGISTRY_ID}/${process.env.IMAGE_NAME}:${process.env.VERSION}`
-            })
+              owner,
+              repo,
+              title: `Release v${version}`,
+              body: `
+                **Release Date:** ${new Date().toISOString().split('T')[0]}
+                **Author:** ${{ github.actor }}
+                **Version:** ${version}
+                **Docker Image:** ${image}
+            
+                **Changes:**
+                ${{ steps.changelog.outputs.commits }}
+              `
+            });
