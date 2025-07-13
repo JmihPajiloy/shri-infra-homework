@@ -1,100 +1,139 @@
-name: Hotfix
+name: Hotfix Release Pipeline
 
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: 'Release version (e.g. 123)'
+      release_version:
+        description: 'Версия релиза (например: 123)'
         required: true
-
-env:
-  REGISTRY: cr.yandex
-  REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
-  IMAGE_NAME: app
-  VERSION: ${{ inputs.version }}
-  HOTFIX_NUMBER: ${{ github.run_number }}
+        type: string
 
 jobs:
-  build-test:
+  typecheck_and_test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: releases/$VERSION
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-      - run: npm ci
-      - run: npm run test
+          ref: releases/${{ github.event.inputs.release_version }}
 
-  build-push-docker:
-    runs-on: ubuntu-latest
-    needs: build-test
-    steps:
-      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          ref: releases/$VERSION
-      - name: Login to Yandex Container Registry
-        run: echo "${{ secrets.YC_OAUTH_TOKEN }}" | docker login --username iam --password-stdin $REGISTRY
-      - name: Build and push Docker image
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run type checking
+        run: npm run lint
+
+      - name: Run tests
+        run: npm test
+
+  hotfix_release:
+    runs-on: ubuntu-latest
+    needs: typecheck_and_test
+    steps:
+      - name: Checkout release branch
+        uses: actions/checkout@v4
+        with:
+          ref: releases/${{ github.event.inputs.release_version }}
+          fetch-depth: 0
+
+      - name: Setup environment
         run: |
-          docker build -t $REGISTRY/$REGISTRY_ID/$IMAGE_NAME:${VERSION}_fix$HOTFIX_NUMBER -t $REGISTRY/$REGISTRY_ID/$IMAGE_NAME:${VERSION}_latest .
-          docker push $REGISTRY/$REGISTRY_ID/$IMAGE_NAME:${VERSION}_fix$HOTFIX_NUMBER
-          docker push $REGISTRY/$REGISTRY_ID/$IMAGE_NAME:${VERSION}_latest
+          HOTFIX_VERSION=${HOTFIX_VERSION:-${{ github.run_number }}}
+          echo "HOTFIX_VERSION=$HOTFIX_VERSION" >> $GITHUB_ENV
+          echo "RELEASE_VERSION=${{ github.event.inputs.release_version }}" >> $GITHUB_ENV
+          echo "FULL_VERSION=${RELEASE_VERSION}_fix${HOTFIX_VERSION}" >> $GITHUB_ENV
+          echo "IMAGE_TAG=${RELEASE_VERSION}_fix${HOTFIX_VERSION}" >> $GITHUB_ENV
 
-  create-tag:
-    runs-on: ubuntu-latest
-    needs: build-push-docker
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: releases/$VERSION
+      - name: Login to Yandex Container Registry
+        env:
+          YC_IAM_TOKEN: ${{ secrets.YC_IAM_TOKEN }}
+        run: |
+          echo $YC_IAM_TOKEN | docker login \
+            --username iam \
+            --password-stdin \
+            cr.yandex
+
+      - name: Build and push Docker image
+        env:
+          YC_REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
+        run: |
+          # Сборка образов с двумя тегами
+          docker build -t cr.yandex/$YC_REGISTRY_ID/app:${{ env.IMAGE_TAG }} .
+          docker tag cr.yandex/$YC_REGISTRY_ID/app:${{ env.IMAGE_TAG }} cr.yandex/$YC_REGISTRY_ID/app:${{ env.RELEASE_VERSION }}_latest
+          
+          # Пуш обоих образов
+          docker push cr.yandex/$YC_REGISTRY_ID/app:${{ env.IMAGE_TAG }}
+          docker push cr.yandex/$YC_REGISTRY_ID/app:${{ env.RELEASE_VERSION }}_latest
+          
+          echo "✅ Образы успешно загружены в Container Registry"
+
       - name: Create hotfix tag
         run: |
-          git tag v${VERSION}_fix${HOTFIX_NUMBER}
-          git push origin v${VERSION}_fix${HOTFIX_NUMBER}
+          git tag v${{ env.RELEASE_VERSION }}_fix${{ env.HOTFIX_VERSION }}
+          git push origin v${{ env.RELEASE_VERSION }}_fix${{ env.HOTFIX_VERSION }}
 
-  comment-issue:
-    runs-on: ubuntu-latest
-    needs: create-tag
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: releases/$VERSION
-          fetch-depth: 0
-      - name: Get commits
-        id: get-commits
+      - name: Get commit history
+        id: changelog
         run: |
-          PREV_TAG=$(git describe --tags --abbrev=0 --match "v*" HEAD~1)
-          COMMITS=$(git log --pretty=format:"- %s" $PREV_TAG..HEAD)
+          PREV_TAG=$(git describe --tags --match "v${RELEASE_VERSION}*" --abbrev=0 2>/dev/null | sort -V | tail -2 | head -1 || echo "")
+          
+          if [ -z "$PREV_TAG" ]; then
+            PREV_TAG="v${{ env.RELEASE_VERSION }}"
+          fi
+          
+          COMMITS=$(git log --pretty=format:"- %s [%h]" $PREV_TAG..HEAD)
+          
           echo "commits<<EOF" >> $GITHUB_OUTPUT
           echo "$COMMITS" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
+
       - name: Find release issue
-        id: find-issue
-        run: |
-          ISSUE_ID=$(gh api graphql -f query='
-            {
-              search(type: ISSUE, query: "repo:${{ github.repository }} is:issue in:title Release v$VERSION", first: 1) {
-                nodes {
-                  ... on Issue { number }
-                }
-              }
-            }' --jq '.data.search.nodes[0].number')
-          echo "issue_id=$ISSUE_ID" >> $GITHUB_OUTPUT
-      - name: Add comment to issue
-        uses: actions/github-script@v7
+        id: find_issue
         env:
-          ISSUE_ID: ${{ steps.find-issue.outputs.issue_id }}
-        with:
-          script: |
-            github.rest.issues.createComment({
-              issue_number: process.env.ISSUE_ID,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: `**Hotfix applied**\n
-                     **Date:** ${new Date().toISOString()}\n
-                     **Author:** ${context.actor}\n
-                     **Commits:**\n${{ steps.get-commits.outputs.commits }}\n
-                     **Docker image:** ${process.env.REGISTRY}/${process.env.REGISTRY_ID}/${process.env.IMAGE_NAME}:${process.env.VERSION}_fix${process.env.HOTFIX_NUMBER}`
-            })
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ github.event.inputs.release_version }}
+        run: |
+          # Поиск issue по версии релиза
+          issue_number=$(gh issue list --search "Release v$RELEASE_VERSION in:title" --json number --jq '.[0].number')
+          
+          if [ -z "$issue_number" ]; then
+            # Fallback поиск по телу issue
+            issue_number=$(gh issue list --search "\"**Version:** $RELEASE_VERSION\" in:body" --json number --jq '.[0].number')
+          fi
+          
+          if [ -z "$issue_number" ]; then
+            echo "::error::Release issue for version $RELEASE_VERSION not found"
+            exit 1
+          fi
+          
+          echo "issue_number=$issue_number" >> $GITHUB_OUTPUT
+
+      - name: Add hotfix comment to issue
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          YC_REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
+        run: |
+
+          COMMENT_BODY=$(cat <<EOF
+          **Дата:** $(date +'%Y-%m-%d')
+          
+          **Автор:** @${{ github.actor }}
+          
+          **Версия фикса:** cr.yandex/$YC_REGISTRY_ID/app:${RELEASE_VERSION}_fix${HOTFIX_VERSION}
+          
+          **Docker image:** ${$IMAGE}
+          
+          **Изменения:**
+          ${{ steps.changelog.outputs.commits }}
+         
+          EOF
+          )
+          
+          # Создание комментария через GitHub CLI
+          gh issue comment ${{ steps.find_issue.outputs.issue_number }} \
+            --body "${COMMENT_BODY}"
