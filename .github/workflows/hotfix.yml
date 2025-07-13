@@ -26,7 +26,7 @@ jobs:
         run: npm ci
 
       - name: Run type checking
-        run: npm run lint
+        run: npm run type-check  # Предполагается, что в package.json есть "type-check": "tsc --noEmit"
 
       - name: Run tests
         run: npm test
@@ -80,14 +80,18 @@ jobs:
       - name: Get commit history
         id: changelog
         run: |
+          # Поиск предыдущего тега релиза
           PREV_TAG=$(git describe --tags --match "v${RELEASE_VERSION}*" --abbrev=0 2>/dev/null | sort -V | tail -2 | head -1 || echo "")
           
           if [ -z "$PREV_TAG" ]; then
+            # Если предыдущий тег не найден, используем оригинальный релизный тег
             PREV_TAG="v${{ env.RELEASE_VERSION }}"
           fi
           
+          # Получение коммитов между тегами
           COMMITS=$(git log --pretty=format:"- %s [%h]" $PREV_TAG..HEAD)
           
+          # Сохранение для последующих шагов
           echo "commits<<EOF" >> $GITHUB_OUTPUT
           echo "$COMMITS" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
@@ -118,7 +122,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           YC_REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
         run: |
-
+          HOTFIX_VERSION=${{ env.HOTFIX_VERSION }}
+          RELEASE_VERSION=${{ env.RELEASE_VERSION }}
+          IMAGE="cr.yandex/$YC_REGISTRY_ID/app:${RELEASE_VERSION}_fix${HOTFIX_VERSION}"
+          
           COMMENT_BODY=$(cat <<EOF
           **Дата:** $(date +'%Y-%m-%d')
           
@@ -126,11 +133,11 @@ jobs:
           
           **Версия фикса:** cr.yandex/$YC_REGISTRY_ID/app:${RELEASE_VERSION}_fix${HOTFIX_VERSION}
           
-          **Docker image:** ${$IMAGE}
+          **Docker image:** ${IMAGE}
           
           **Изменения:**
           ${{ steps.changelog.outputs.commits }}
-         
+          
           EOF
           )
           
