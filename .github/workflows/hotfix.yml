@@ -26,7 +26,7 @@ jobs:
         run: npm ci
 
       - name: Run type checking
-        run: npm run type-check  # Предполагается, что в package.json есть "type-check": "tsc --noEmit"
+        run: npm run lint
 
       - name: Run tests
         run: npm test
