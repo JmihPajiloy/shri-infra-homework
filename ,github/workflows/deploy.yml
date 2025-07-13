@@ -1,0 +1,75 @@
+name: Deploy to Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 123)'
+        required: true
+
+env:
+  REGISTRY: cr.yandex
+  REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
+  IMAGE_NAME: app
+  VERSION: ${{ inputs.version }}
+
+jobs:
+  verify-image:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check image existence
+        run: |
+          # Проверяем наличие образа с тегом latest
+          if ! curl -s -H "Authorization: Bearer $(yc iam create-token)" \
+            "https://container-registry.api.cloud.yandex.net/container-registry/v1/images/${REGISTRY_ID}/app/tags/${VERSION}_latest" >/dev/null; then
+            echo "Image not found!"
+            exit 1
+          fi
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: verify-image
+    steps:
+      - name: Deploy to production
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            docker stop app || true
+            docker rm app || true
+            echo "${{ secrets.YC_OAUTH_TOKEN }}" | docker login --username iam --password-stdin cr.yandex
+            docker pull $REGISTRY/$REGISTRY_ID/$IMAGE_NAME:${VERSION}_latest
+            docker run -d --name app -p 3000:3000 $REGISTRY/$REGISTRY_ID/$IMAGE_NAME:${VERSION}_latest
+
+  comment-issue:
+    runs-on: ubuntu-latest
+    needs: deploy
+    steps:
+      - name: Find release issue
+        id: find-issue
+        run: |
+          ISSUE_ID=$(gh api graphql -f query='
+            {
+              search(type: ISSUE, query: "repo:${{ github.repository }} is:issue in:title Release v$VERSION", first: 1) {
+                nodes {
+                  ... on Issue { number }
+                }
+              }
+            }' --jq '.data.search.nodes[0].number')
+          echo "issue_id=$ISSUE_ID" >> $GITHUB_OUTPUT
+      - name: Add deployment comment
+        uses: actions/github-script@v7
+        env:
+          ISSUE_ID: ${{ steps.find-issue.outputs.issue_id }}
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: process.env.ISSUE_ID,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `**Deployed to production**\n
+                     **Date:** ${new Date().toISOString()}\n
+                     **Deployed by:** ${context.actor}`
+            })
