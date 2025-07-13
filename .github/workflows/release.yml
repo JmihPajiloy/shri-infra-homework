@@ -23,6 +23,9 @@ jobs:
 
   create-branch:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
     needs: build-test
     steps:
       - uses: actions/checkout@v4
