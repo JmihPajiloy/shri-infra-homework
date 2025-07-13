@@ -7,6 +7,7 @@
     "watch": "webpack --watch",
     "test": "jest",
     "lint": "eslint ./src",
+    "type-check": "tsc --noEmit",
     "build:docker": "docker build -t shri-infra-homework .",
     "start:docker": "docker run -p 3000:3000 shri-infra-homework"
   },
