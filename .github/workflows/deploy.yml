@@ -66,16 +66,13 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               state: 'all',
-              labels: ['release'],
               per_page: 100
             });
             
-            const targetIssue = issues.find(issue => 
-              issue.body.includes(`**Version:** ${process.env.VERSION}`)
-            );
+            const targetIssue = issues.find(issue => issue.title.includes(`Release v${process.env.VERSION}`));                     
             
             if (!targetIssue) {
-              core.setFailed(`Release issue for version ${process.env.VERSION} not found`);
+              core.setFailed(`Release issue for version ${process.env.RELEASE_VERSION} not found`);
               return 0;
             }
             
