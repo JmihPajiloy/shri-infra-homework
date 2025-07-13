@@ -53,9 +53,9 @@ jobs:
           YC_REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
         run: |
           docker build -t cr.yandex/$YC_REGISTRY_ID/app:${{ env.RELEASE_VERSION }} .
-          docker tag cr.yandex/$YC_REGISTRY_ID/app:${{ env.RELEASE_VERSION }} cr.yandex/$YC_REGISTRY_ID/app:latest
+          docker tag cr.yandex/$YC_REGISTRY_ID/app:${{ env.RELEASE_VERSION }} cr.yandex/$YC_REGISTRY_ID/app:${{ env.RELEASE_VERSION }}_latest
           docker push cr.yandex/$YC_REGISTRY_ID/app:${{ env.RELEASE_VERSION }}
-          docker push cr.yandex/$YC_REGISTRY_ID/app:latest
+          docker push cr.yandex/$YC_REGISTRY_ID/app:${{ env.RELEASE_VERSION }}_latest
 
       - name: Create release tag
         run: |
