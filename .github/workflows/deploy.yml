@@ -1,4 +1,4 @@
-name: Deploy
+name: Deploy to Production
 
 on:
   workflow_dispatch:
@@ -17,15 +17,13 @@ jobs:
           YC_REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
           RELEASE_VERSION: ${{ github.event.inputs.release_version }}
         run: |
-          # Проверка существования образа в Container Registry
           echo ${{ secrets.YC_IAM_TOKEN }} | docker login \
             --username iam \
             --password-stdin \
             cr.yandex
 
-          # Проверка наличия образа с тегом версии
           docker pull cr.yandex/$YC_REGISTRY_ID/app:$RELEASE_VERSION || exit 1
-          # Проверка наличия образа с тегом latest
+          
           docker pull cr.yandex/$YC_REGISTRY_ID/app:${RELEASE_VERSION}_latest || exit 1
           
           echo "✅ Оба образа существуют в Container Registry"
@@ -33,21 +31,23 @@ jobs:
       - name: Deploy to production server
         uses: appleboy/ssh-action@v1
         with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
           script: |
-            # Остановка и удаление предыдущего контейнера
+            # Stop and remove previous container
             docker stop app || true
             docker rm app || true
             
-            # Обновление образа и запуск нового контейнера
+            # Login and pull new image
             echo ${{ secrets.YC_IAM_TOKEN }} | docker login \
               --username iam \
               --password-stdin \
               cr.yandex
             
             docker pull cr.yandex/${{ secrets.YC_REGISTRY_ID }}/app:${{ github.event.inputs.release_version }}_latest
+            
+            # Run new container
             docker run -d \
               --name app \
               -p 3000:3000 \
@@ -57,39 +57,38 @@ jobs:
 
       - name: Find release issue
         id: find_issue
-        uses: actions/github-script@v7
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ github.event.inputs.release_version }}
-        with:
-          script: |
-            const { data: issues } = await github.rest.issues.listForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'all',
-              per_page: 100
-            });
-            
-            const targetIssue = issues.find(issue => issue.title.includes(`Release v${process.env.VERSION}`));                     
-            
-            if (!targetIssue) {
-              core.setFailed(`Release issue for version ${process.env.RELEASE_VERSION} not found`);
-              return 0;
-            }
-            
-            return targetIssue.number;
+        run: |
+          # Search for release issue
+          issue_number=$(gh issue list --search "Release v$VERSION in:title" --json number --jq '.[0].number')
+          
+          if [ -z "$issue_number" ]; then
+            # Fallback search in body
+            issue_number=$(gh issue list --search "\"**Version:** $VERSION\" in:body" --json number --jq '.[0].number')
+          fi
+          
+          if [ -z "$issue_number" ]; then
+            echo "::error::Release issue for version $VERSION not found"
+            exit 1
+          fi
+          
+          echo "issue_number=$issue_number" >> $GITHUB_OUTPUT
 
       - name: Add deployment comment to issue
-        uses: actions/github-script@v7
-        if: steps.find_issue.outputs.result != '0'
-        with:
-          script: |
-            github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: ${{ steps.find_issue.outputs.result }},
-              body: `🚀 **Выкатка в прод завершена!**\n` +
-                    `- Дата: ${new Date().toISOString().split('T')[0]}\n` +
-                    `- Ответственный: @${{ github.actor }}\n` +
-                    `- Версия: ${{ github.event.inputs.release_version }}\n` +
-                    `- Образ: cr.yandex/${{ secrets.YC_REGISTRY_ID }}/app:${{ github.event.inputs.release_version }}_latest`
-            });
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DATE=$(date +%Y-%m-%d)
+          VERSION=${{ github.event.inputs.release_version }}
+          REGISTRY_ID=${{ secrets.YC_REGISTRY_ID }}
+          IMAGE="cr.yandex/$REGISTRY_ID/app:${VERSION}_latest"
+          
+          # Create comment using GitHub CLI
+          gh issue comment ${{ steps.find_issue.outputs.issue_number }} \
+            --body "🚀 **Выкатка в прод завершена!**
+  - Дата: $DATE
+  - Ответственный: @${{ github.actor }}
+  - Версия: $VERSION
+  - Образ: $IMAGE"
