@@ -131,7 +131,7 @@ jobs:
           
           **Автор:** @${{ github.actor }}
           
-          **Версия фикса:** cr.yandex/$YC_REGISTRY_ID/app:${RELEASE_VERSION}_fix${HOTFIX_VERSION}
+          **Версия фикса:** ${HOTFIX_VERSION}
           
           **Docker image:** ${IMAGE}
           
